@@ -26,9 +26,11 @@ jobs:
           corepack prepare yarn@4.2.2 --activate
           yarn --version
 
-      # 允许在 runner 上更新锁文件，避免 YN0028
-      - name: Install deps
-        run: yarn install --mode=update-lockfile
+      - name: Install deps (node-modules linker)
+        run: |
+          yarn config set nodeLinker node-modules
+          # 仅在 runner 上更新锁文件，避免 YN0028；若你已提交对齐后的 yarn.lock，可改成 --immutable
+          yarn install --mode=update-lockfile
 
       - name: Setup Java (Temurin 17)
         uses: actions/setup-java@v4
