@@ -1,10 +1,6 @@
-name: Build Android Debug (XStreaming)
+name: Build Android Debug (manual)
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -19,53 +15,36 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Enable Corepack & Use Yarn 4
-        run: |
-          corepack enable
-          corepack prepare yarn@4.2.2 --activate
-          yarn --version
-          yarn install --immutable
-
       - name: Setup Node.js (20.x)
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'yarn'
 
-      - name: Enable Corepack & Yarn
+      - name: Enable Corepack & Yarn 4.2.2
         run: |
           corepack enable
-          (yarn --version && yarn install --immutable) || yarn install
+          corepack prepare yarn@4.2.2 --activate
+          yarn --version
+
+      # 允许在 runner 上更新锁文件，避免 YN0028
+      - name: Install deps
+        run: yarn install --mode=update-lockfile
 
       - name: Setup Java (Temurin 17)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Gradle Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            .gradle/caches
-            .gradle/wrapper
-            android/.gradle
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      - name: Make Gradle executable
+      - name: Make gradlew executable
         run: chmod +x android/gradlew
 
       - name: Build Debug APK
         working-directory: android
-        run: |
-          ./gradlew clean
-          ./gradlew :app:assembleDebug
+        run: ./gradlew :app:assembleDebug
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
@@ -73,4 +52,4 @@ jobs:
           name: xstreaming-android-debug-apk
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
