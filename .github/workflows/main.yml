@@ -24,6 +24,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ✅ 强制使用 Yarn 1（忽略项目内 yarnPath），杜绝被 Yarn 4 劫持
+      - name: Force Yarn 1.x (ignore project yarnPath)
+        run: |
+          set -euxo pipefail
+          # 1) 关闭 Corepack 的干预，避免它再把 Yarn 指到 Berry
+          corepack disable || true
+
+          # 2) 全局安装 Yarn 1（Runner 上 /usr/local/bin 通常在 PATH）
+          npm i -g yarn@1.22.22
+
+          # 3) 关键！忽略项目内 .yarnrc.yml 的 yarnPath
+          export YARN_IGNORE_PATH=1
+          echo "YARN_IGNORE_PATH=1" >> "$GITHUB_ENV"
+
+          # 4) (可选) 如项目内有 yarnPath，临时把那一行删掉（不提交，仅当前工作目录）
+          if [ -f .yarnrc.yml ]; then
+            grep -q '^yarnPath:' .yarnrc.yml && sed -i '/^yarnPath:/d' .yarnrc.yml || true
+          fi
+
+          yarn -v
+          which yarn
+
       # ✅ 用 Yarn Classic（1.x），避免 Berry/PnP 带来的 node_modules 缺失
       - name: Setup Node.js (20.x) + Yarn 1.22.x
         run: |
