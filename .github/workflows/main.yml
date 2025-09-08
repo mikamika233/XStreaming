@@ -3,11 +3,11 @@ name: Build Android Debug (manual, apply patches safely)
 on:
   workflow_dispatch:
 
-# Minimal permissions; actions/upload-artifact still works
+# 最小权限
 permissions:
   contents: read
 
-# Avoid duplicate manual runs building the same ref
+# 避免重复触发同时运行
 concurrency:
   group: android-debug-${{ github.ref }}
   cancel-in-progress: true
@@ -15,8 +15,9 @@ concurrency:
 env:
   NODE_OPTIONS: --max_old_space_size=4096
   GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
+  # 双保险：强制使用 node-modules linker
   YARN_NODE_LINKER: node-modules
-  # Speed up Gradle; you can adjust memory if needed
+  # Gradle 性能与编码
   ORG_GRADLE_PROJECT_org.gradle.jvmargs: -Xmx3g -Dfile.encoding=UTF-8
   JAVA_TOOL_OPTIONS: -Dfile.encoding=UTF-8
 
@@ -31,7 +32,7 @@ jobs:
       - name: Setup Node.js (20.x)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'   # consider pinning like '20.16.0' for reproducibility
+          node-version: '20' # 如需更强确定性，可固定小版本如 20.16.0
 
       - name: Enable Corepack & Yarn 4.2.2
         run: |
@@ -41,7 +42,7 @@ jobs:
           yarn --version
           node -v
 
-      # Cache the Yarn tarball cache and Gradle caches to speed up CI
+      # 缓存 Yarn tarball 缓存与 Gradle 缓存
       - name: Restore Yarn & Gradle caches
         uses: actions/cache@v4
         with:
@@ -51,12 +52,12 @@ jobs:
             android/.gradle
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-node${{ steps.nodever.outputs.version || '20' }}-yarn4-${{ hashFiles('**/yarn.lock') }}-gradle-${{ hashFiles('**/gradle-wrapper.properties', '**/build.gradle', '**/gradle.properties', '**/settings.gradle', '**/settings.gradle.kts') }}
+          key: ${{ runner.os }}-yarn4-${{ hashFiles('**/yarn.lock') }}-gradle-${{ hashFiles('**/gradle-wrapper.properties', '**/settings.gradle*', '**/build.gradle*', '**/gradle.properties') }}
           restore-keys: |
-            ${{ runner.os }}-node${{ steps.nodever.outputs.version || '20' }}-yarn4-
+            ${{ runner.os }}-yarn4-
             ${{ runner.os }}-
 
-      # Normalize patch newlines (CRLF -> LF) to avoid parse failures
+      # 1) 规范化补丁换行（CRLF -> LF）
       - name: Normalize patch files (CRLF -> LF)
         run: |
           set -euxo pipefail
@@ -64,19 +65,60 @@ jobs:
             find patches -type f -name "*.patch" -print0 | xargs -0 -I{} bash -lc 'sed -i "s/\r$//" "{}"'
           fi
 
-      # Use node-modules linker and skip lifecycle scripts so patch-package doesn't run during install
+      # 2) 安装依赖：强制 node-modules 链接器，跳过 lifecycle scripts（避免 patch-package 在此阶段运行）
       - name: Install dependencies (skip scripts)
         run: |
           set -euxo pipefail
           yarn config set nodeLinker node-modules
-          # Ensure Yarn stores tarballs in repo-local cache for faster CI installs
           yarn config set enableGlobalCache false
           YARN_ENABLE_SCRIPTS=false yarn install --mode=update-lockfile
-          test -d node_modules
-          # Sanity: ensure patch-package is available
+          # 确保 patch-package 可用（不会真正执行，只验存在）
           npx --yes patch-package --help >/dev/null
 
-      # Move patches that don't correspond to installed packages into patches/_ignored
+      # 2.1) 诊断 Yarn 配置/工作区，帮助定位为什么没有 node_modules
+      - name: Diagnose Yarn linker & workspaces
+        run: |
+          set -euxo pipefail
+          echo "Yarn version:"; yarn --version
+          echo "Node version:"; node -v
+
+          echo "Effective nodeLinker:"
+          yarn config get nodeLinker || true
+
+          echo "Project .yarnrc.yml (if any):"
+          test -f .yarnrc.yml && cat .yarnrc.yml || echo "(no .yarnrc.yml)"
+
+          echo "Workspaces info:"
+          yarn workspaces list || true
+          test -f package.json && head -n 80 package.json || true
+
+      # 2.2) 如果没有生成 node_modules，则清理 PnP/安装状态并强制用 node-modules 重装一次
+      - name: Ensure node_modules exists (force node-modules reinstall if needed)
+        run: |
+          set -euxo pipefail
+          if [ ! -d node_modules ]; then
+            echo "node_modules not found — forcing node-modules linker reinstall..."
+            rm -f .pnp.cjs .pnp.data.json .pnp.loader.mjs 2>/dev/null || true
+            rm -f .yarn/install-state.gz 2>/dev/null || true
+            rm -rf node_modules 2>/dev/null || true
+
+            export YARN_NODE_LINKER=node-modules
+            yarn config set nodeLinker node-modules
+            yarn config set enableGlobalCache false
+
+            YARN_ENABLE_SCRIPTS=false yarn install --mode=update-lockfile --check-cache
+
+            if [ ! -d node_modules ]; then
+              echo "::error::Yarn 安装后仍未生成 node_modules。可能仍在使用 PnP 或当前目录不是工作区根。"
+              yarn config --why nodeLinker || true
+              yarn config --why enableGlobalCache || true
+              ls -la
+              exit 1
+            fi
+          fi
+          echo "node_modules is present."
+
+      # 3) 仅对“当前确实安装了的包”应用补丁：未安装的补丁移到 patches/_ignored
       - name: Prune patches for missing packages
         shell: bash
         run: |
@@ -110,11 +152,11 @@ jobs:
             echo "No patches directory present."
           fi
 
-      # Apply remaining patch-package patches
+      # 4) 手动应用剩余补丁
       - name: Apply patch-package patches
         run: npx --yes patch-package
 
-      # Ensure RN Android CLI & Gradle plugin exist (for runners that don't have them vendored)
+      # 5) 兜底：确保 RN Android CLI & Gradle plugin 在 node_modules 中（仅对 runner 生效）
       - name: Ensure RN Android CLI & Gradle plugin
         run: |
           set -euxo pipefail
@@ -148,7 +190,7 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      # Optional: show Gradle & AGP versions to help debug CI env quickly
+      # 可选：打印 Gradle 与 AGP 信息，便于排查
       - name: Print Gradle & AGP versions
         working-directory: android
         run: |
@@ -158,7 +200,6 @@ jobs:
       - name: Build Debug APK
         working-directory: android
         env:
-          # Avoid analytics noise; helps with determinism in CI
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
           CI: true
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace --warning-mode all
