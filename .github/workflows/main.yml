@@ -27,7 +27,7 @@ jobs:
           cache: yarn
 
       - name: Ensure Yarn 1.22
-        run: npm i -g yarn@1.22.22
+        run: npm i -g yarn@4.2.2
 
       # JDK 17（RN 0.72 / AGP 8 需要 Java 17）
       - name: Setup Java 17
