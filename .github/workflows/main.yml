@@ -1,4 +1,4 @@
-name: Build Android Debug (manual, apply patches)
+name: Build Android Debug (manual, apply patches safely)
 
 on:
   workflow_dispatch:
@@ -27,7 +27,7 @@ jobs:
           corepack prepare yarn@4.2.2 --activate
           yarn --version
 
-      # 1) 规范化补丁换行（CRLF -> LF）
+      # 1) 规范化补丁换行（CRLF -> LF），避免解析失败
       - name: Normalize patch files (CRLF -> LF)
         run: |
           if [ -d patches ]; then
@@ -35,6 +35,99 @@ jobs:
           fi
 
       # 2) 安装依赖：使用 node-modules 链接器，并跳过 lifecycle scripts（避免 patch-package 在此阶段运行）
+      - name: Install dependencies (skip scripts)
+        run: |
+          yarn config set nodeLinker node-modules
+          YARN_ENABLE_SCRIPTS=false yarn install --mode=update-lockfile
+          node -v
+          yarn -v
+          test -d node_modules
+
+      # 3) 仅对“当前确实安装了的包”应用补丁：未安装的补丁移到 patches/_ignored
+      - name: Prune patches for missing packages
+        run: |
+          set -e
+          if [ -d patches ]; then
+            mkdir -p patches/_ignored
+            echo "Scanning patches..."
+            # 处理两类文件名：
+            #   - react-native-paper+5.12.5.patch               -> 包名: react-native-paper
+            #   - @react-native+gradle-plugin+0.73.0.patch      -> 包名: @react-native/gradle-plugin
+            for p in $(find patches -maxdepth 1 -name "*.patch" -type f); do
+              base="$(basename "$p")"
+              name="${base%.patch}"
+
+              if [[ "$name" == @*+*+* ]]; then
+                scope="$(echo "$name" | cut -d'+' -f1)"     # @react-native
+                pkg="$(echo "$name"   | cut -d'+' -f2)"     # gradle-plugin
+                target="${scope}/${pkg}"
+              else
+                target="$(echo "$name" | cut -d'+' -f1)"    # react-native-paper
+              fi
+
+              if [ ! -d "node_modules/$target" ]; then
+                echo "Skipping patch $base (package $target not installed)"
+                mv "$p" "patches/_ignored/$base"
+              else
+                echo "Keeping patch $base (package $target present)"
+              fi
+            done
+            echo "Done pruning."
+          else
+            echo "No patches directory present."
+          fi
+
+      # 4) 手动应用剩余补丁
+      - name: Apply patch-package patches
+        run: npx patch-package
+
+      # 5) 兜底：确保 RN Android CLI & Gradle plugin 在 node_modules 中（仅对 runner 生效）
+      - name: Ensure RN Android CLI & Gradle plugin
+        run: |
+          set -e
+          MISSING=0
+          if [ ! -f "node_modules/@react-native-community/cli-platform-android/native_modules.gradle" ]; then
+            echo "Missing native_modules.gradle — installing @react-native-community/cli-platform-android ..."
+            YARN_ENABLE_SCRIPTS=false yarn add -D @react-native-community/cli-platform-android
+            MISSING=1
+          fi
+          if [ ! -d "node_modules/@react-native/gradle-plugin" ]; then
+            echo "Missing @react-native/gradle-plugin — installing ..."
+            YARN_ENABLE_SCRIPTS=false yarn add -D @react-native/gradle-plugin
+            MISSING=1
+          fi
+          if [ "$MISSING" = "1" ]; then
+            # 新装的包若也有补丁，补丁目录没被移走，就再尝试一次应用
+            npx patch-package || true
+          fi
+          # 最终强校验
+          test -f node_modules/@react-native-community/cli-platform-android/native_modules.gradle
+          test -d node_modules/@react-native/gradle-plugin
+
+      - name: Setup Java (Temurin 17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Build Debug APK
+        working-directory: android
+        run: ./gradlew :app:assembleDebug
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: xstreaming-android-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7      # 2) 安装依赖：使用 node-modules 链接器，并跳过 lifecycle scripts（避免 patch-package 在此阶段运行）
       - name: Install dependencies (skip scripts)
         run: |
           yarn config set nodeLinker node-modules
