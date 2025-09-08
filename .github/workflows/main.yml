@@ -69,12 +69,23 @@ jobs:
             find patches -type f -name "*.patch" -print0 | xargs -0 -I{} bash -lc 'sed -i "s/\r$//" "{}"'
           fi
 
-      # 用 Yarn 1 安装依赖（让 lifecycle scripts 正常跑，从而自动执行 patch-package）
-      - name: Install dependencies
+      - name: Use Yarn 4 (Corepack) with node-modules
         run: |
           set -euxo pipefail
+          corepack enable
+          corepack prepare yarn@4.2.2 --activate
+          # 强制使用 node-modules linker，禁用全局缓存以便 CI 可复现
+          yarn config set nodeLinker node-modules
+          yarn config set enableGlobalCache false
           yarn -v
-          yarn
+
+      - name: Install dependencies (allow lockfile update, no immutable)
+        run: |
+          set -euxo pipefail
+          # 关闭 CI 下的不可变安装，否则会报 YN0028
+          export YARN_ENABLE_IMMUTABLE_INSTALLS=false
+          # 允许 Yarn 规范化/修复 lockfile
+          YARN_ENABLE_SCRIPTS=false yarn install --mode=update-lockfile --check-cache --no-immutable
           test -d node_modules
 
       # 保险：把不匹配的补丁移走（如果 postinstall 已经打过补丁，这步一般是空操作）
