@@ -3,14 +3,26 @@ name: Build Android Debug (manual, apply patches safely)
 on:
   workflow_dispatch:
 
+# Minimal permissions; actions/upload-artifact still works
+permissions:
+  contents: read
+
+# Avoid duplicate manual runs building the same ref
+concurrency:
+  group: android-debug-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_OPTIONS: --max_old_space_size=4096
+  GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
+  YARN_NODE_LINKER: node-modules
+  # Speed up Gradle; you can adjust memory if needed
+  ORG_GRADLE_PROJECT_org.gradle.jvmargs: -Xmx3g -Dfile.encoding=UTF-8
+  JAVA_TOOL_OPTIONS: -Dfile.encoding=UTF-8
+
 jobs:
   android-debug:
     runs-on: ubuntu-latest
-
-    env:
-      NODE_OPTIONS: --max_old_space_size=4096
-      GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
-      YARN_NODE_LINKER: node-modules  # 双保险，强制用 node-modules
 
     steps:
       - name: Checkout
@@ -19,50 +31,71 @@ jobs:
       - name: Setup Node.js (20.x)
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'   # consider pinning like '20.16.0' for reproducibility
 
       - name: Enable Corepack & Yarn 4.2.2
         run: |
+          set -euxo pipefail
           corepack enable
           corepack prepare yarn@4.2.2 --activate
           yarn --version
+          node -v
 
-      # 1) 规范化补丁换行（CRLF -> LF），避免解析失败
+      # Cache the Yarn tarball cache and Gradle caches to speed up CI
+      - name: Restore Yarn & Gradle caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .yarn/cache
+            .gradle
+            android/.gradle
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-node${{ steps.nodever.outputs.version || '20' }}-yarn4-${{ hashFiles('**/yarn.lock') }}-gradle-${{ hashFiles('**/gradle-wrapper.properties', '**/build.gradle', '**/gradle.properties', '**/settings.gradle', '**/settings.gradle.kts') }}
+          restore-keys: |
+            ${{ runner.os }}-node${{ steps.nodever.outputs.version || '20' }}-yarn4-
+            ${{ runner.os }}-
+
+      # Normalize patch newlines (CRLF -> LF) to avoid parse failures
       - name: Normalize patch files (CRLF -> LF)
         run: |
+          set -euxo pipefail
           if [ -d patches ]; then
             find patches -type f -name "*.patch" -print0 | xargs -0 -I{} bash -lc 'sed -i "s/\r$//" "{}"'
           fi
 
-      # 2) 安装依赖：使用 node-modules 链接器，并跳过 lifecycle scripts（避免 patch-package 在此阶段运行）
+      # Use node-modules linker and skip lifecycle scripts so patch-package doesn't run during install
       - name: Install dependencies (skip scripts)
         run: |
+          set -euxo pipefail
           yarn config set nodeLinker node-modules
+          # Ensure Yarn stores tarballs in repo-local cache for faster CI installs
+          yarn config set enableGlobalCache false
           YARN_ENABLE_SCRIPTS=false yarn install --mode=update-lockfile
-          node -v
-          yarn -v
           test -d node_modules
+          # Sanity: ensure patch-package is available
+          npx --yes patch-package --help >/dev/null
 
-      # 3) 仅对“当前确实安装了的包”应用补丁：未安装的补丁移到 patches/_ignored
+      # Move patches that don't correspond to installed packages into patches/_ignored
       - name: Prune patches for missing packages
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          shopt -s nullglob
           if [ -d patches ]; then
             mkdir -p patches/_ignored
             echo "Scanning patches..."
-            # 处理两类文件名：
-            #   - react-native-paper+5.12.5.patch               -> 包名: react-native-paper
-            #   - @react-native+gradle-plugin+0.73.0.patch      -> 包名: @react-native/gradle-plugin
-            for p in $(find patches -maxdepth 1 -name "*.patch" -type f); do
+            while IFS= read -r -d '' p; do
               base="$(basename "$p")"
               name="${base%.patch}"
 
               if [[ "$name" == @*+*+* ]]; then
-                scope="$(echo "$name" | cut -d'+' -f1)"     # @react-native
-                pkg="$(echo "$name"   | cut -d'+' -f2)"     # gradle-plugin
+                scope="${name%%+*}"            # @scope
+                rest="${name#${scope}+}"       # package+version[…]
+                pkg="${rest%%+*}"              # package
                 target="${scope}/${pkg}"
               else
-                target="$(echo "$name" | cut -d'+' -f1)"    # react-native-paper
+                target="${name%%+*}"           # unscoped package
               fi
 
               if [ ! -d "node_modules/$target" ]; then
@@ -71,20 +104,20 @@ jobs:
               else
                 echo "Keeping patch $base (package $target present)"
               fi
-            done
+            done < <(find patches -maxdepth 1 -type f -name "*.patch" -print0)
             echo "Done pruning."
           else
             echo "No patches directory present."
           fi
 
-      # 4) 手动应用剩余补丁
+      # Apply remaining patch-package patches
       - name: Apply patch-package patches
-        run: npx patch-package
+        run: npx --yes patch-package
 
-      # 5) 兜底：确保 RN Android CLI & Gradle plugin 在 node_modules 中（仅对 runner 生效）
+      # Ensure RN Android CLI & Gradle plugin exist (for runners that don't have them vendored)
       - name: Ensure RN Android CLI & Gradle plugin
         run: |
-          set -e
+          set -euxo pipefail
           MISSING=0
           if [ ! -f "node_modules/@react-native-community/cli-platform-android/native_modules.gradle" ]; then
             echo "Missing native_modules.gradle — installing @react-native-community/cli-platform-android ..."
@@ -97,10 +130,8 @@ jobs:
             MISSING=1
           fi
           if [ "$MISSING" = "1" ]; then
-            # 新装的包若也有补丁，补丁目录没被移走，就再尝试一次应用
-            npx patch-package || true
+            npx --yes patch-package || true
           fi
-          # 最终强校验
           test -f node_modules/@react-native-community/cli-platform-android/native_modules.gradle
           test -d node_modules/@react-native/gradle-plugin
 
@@ -117,67 +148,20 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Build Debug APK
+      # Optional: show Gradle & AGP versions to help debug CI env quickly
+      - name: Print Gradle & AGP versions
         working-directory: android
-        run: ./gradlew :app:assembleDebug
-
-      - name: Upload Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: xstreaming-android-debug-apk
-          path: android/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-          retention-days: 7      # 2) 安装依赖：使用 node-modules 链接器，并跳过 lifecycle scripts（避免 patch-package 在此阶段运行）
-      - name: Install dependencies (skip scripts)
         run: |
-          yarn config set nodeLinker node-modules
-          YARN_ENABLE_SCRIPTS=false yarn install --mode=update-lockfile
-          node -v
-          yarn -v
-
-      # 3) 手动应用补丁（此时补丁已为 LF）
-      - name: Apply patch-package patches
-        run: npx patch-package
-
-      # 4) 兜底：确保 RN Android CLI & Gradle plugin 存在（仅对 runner 生效）
-      - name: Ensure RN Android CLI & Gradle plugin
-        run: |
-          set -e
-          MISSING=0
-          if [ ! -f "node_modules/@react-native-community/cli-platform-android/native_modules.gradle" ]; then
-            echo "Missing native_modules.gradle — installing @react-native-community/cli-platform-android ..."
-            YARN_ENABLE_SCRIPTS=false yarn add -D @react-native-community/cli-platform-android
-            MISSING=1
-          fi
-          if [ ! -d "node_modules/@react-native/gradle-plugin" ]; then
-            echo "Missing @react-native/gradle-plugin — installing ..."
-            YARN_ENABLE_SCRIPTS=false yarn add -D @react-native/gradle-plugin
-            MISSING=1
-          fi
-          if [ "$MISSING" = "1" ]; then
-            # 再跑一次 patch-package，确保新增包也应用到补丁（若有）
-            npx patch-package || true
-          fi
-          # 最终强校验
-          test -f node_modules/@react-native-community/cli-platform-android/native_modules.gradle
-          test -d node_modules/@react-native/gradle-plugin
-
-      - name: Setup Java (Temurin 17)
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: gradle
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Make gradlew executable
-        run: chmod +x android/gradlew
+          ./gradlew --version
+          ./gradlew buildEnvironment -q || true
 
       - name: Build Debug APK
         working-directory: android
-        run: ./gradlew :app:assembleDebug
+        env:
+          # Avoid analytics noise; helps with determinism in CI
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          CI: true
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace --warning-mode all
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
