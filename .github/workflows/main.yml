@@ -24,6 +24,10 @@ jobs:
           corepack enable
           corepack prepare yarn@4.2.2 --activate
 
+      # 关键：显式关闭 immutable（CI=true 时默认是开的）
+      - name: Install dependencies (allow lockfile updates)
+        run: yarn install --no-immutable
+      
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
@@ -44,10 +48,6 @@ jobs:
       # 可选：Gradle 缓存（加速构建）
       - name: Setup Gradle (cache)
         uses: gradle/actions/setup-gradle@v3
-
-      # 安装 JS 依赖（使用 yarn）
-      - name: Install dependencies
-        run: yarn install --frozen-lockfile || yarn install
 
       # 赋予 gradlew 执行权限
       - name: Make gradlew executable
