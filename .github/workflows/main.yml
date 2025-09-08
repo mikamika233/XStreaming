@@ -19,15 +19,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Ensure Yarn 1.22
+        run: npm i -g yarn@4.2.2
+      
       # Node 20，且强制使用 Yarn 1.x（与 README 要求一致）
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: yarn
-
-      - name: Ensure Yarn 1.22
-        run: npm i -g yarn@4.2.2
 
       # JDK 17（RN 0.72 / AGP 8 需要 Java 17）
       - name: Setup Java 17
