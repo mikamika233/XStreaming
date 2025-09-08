@@ -56,12 +56,7 @@ jobs:
             find patches -type f -name "*.patch" -print0 | xargs -0 -I{} bash -lc 'sed -i "s/\r$//" "{}"'
           fi
 
-      # 用 Yarn 1 安装依赖（让 lifecycle scripts 正常跑，从而自动执行 patch-package）
-      - name: Install dependencies
-        run: |
-          set -euxo pipefail
-          yarn install --frozen-lockfile
-          test -d node_modules
+      
 
       # 保险：把不匹配的补丁移走（如果 postinstall 已经打过补丁，这步一般是空操作）
       - name: Prune patches for missing packages
