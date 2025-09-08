@@ -1,13 +1,11 @@
-name: Build Android Debug (manual, apply patches safely)
+name: Build Android Debug (manual)
 
 on:
   workflow_dispatch:
 
-# 最小权限
 permissions:
   contents: read
 
-# 避免重复触发同时运行
 concurrency:
   group: android-debug-${{ github.ref }}
   cancel-in-progress: true
@@ -15,9 +13,6 @@ concurrency:
 env:
   NODE_OPTIONS: --max_old_space_size=4096
   GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
-  # 双保险：强制使用 node-modules linker
-  YARN_NODE_LINKER: node-modules
-  # Gradle 性能与编码
   ORG_GRADLE_PROJECT_org.gradle.jvmargs: -Xmx3g -Dfile.encoding=UTF-8
   JAVA_TOOL_OPTIONS: -Dfile.encoding=UTF-8
 
@@ -29,12 +24,119 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js (20.x)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20' # 如需更强确定性，可固定小版本如 20.16.0
+      # ✅ 用 Yarn Classic（1.x），避免 Berry/PnP 带来的 node_modules 缺失
+      - name: Setup Node.js (20.x) + Yarn 1.22.x
+        run: |
+          set -euxo pipefail
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          node -v
+          yarn -v
 
-      - name: Enable Corepack & Yarn 4.2.2
+      # 缓存（针对 Yarn 1：主要是 ~/.cache/yarn；Gradle 缓存照旧）
+      - name: Restore Yarn & Gradle caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/yarn
+            .gradle
+            android/.gradle
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-yarn1-${{ hashFiles('**/yarn.lock') }}-gradle-${{ hashFiles('**/gradle-wrapper.properties', '**/settings.gradle*', '**/build.gradle*', '**/gradle.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn1-
+            ${{ runner.os }}-
+
+      # 规范化补丁换行
+      - name: Normalize patch files (CRLF -> LF)
+        run: |
+          set -euxo pipefail
+          if [ -d patches ]; then
+            find patches -type f -name "*.patch" -print0 | xargs -0 -I{} bash -lc 'sed -i "s/\r$//" "{}"'
+          fi
+
+      # 用 Yarn 1 安装依赖（让 lifecycle scripts 正常跑，从而自动执行 patch-package）
+      - name: Install dependencies
+        run: |
+          set -euxo pipefail
+          yarn install --frozen-lockfile
+          test -d node_modules
+
+      # 保险：把不匹配的补丁移走（如果 postinstall 已经打过补丁，这步一般是空操作）
+      - name: Prune patches for missing packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          if [ -d patches ]; then
+            mkdir -p patches/_ignored
+            while IFS= read -r -d '' p; do
+              base="$(basename "$p")"; name="${base%.patch}"
+              if [[ "$name" == @*+*+* ]]; then
+                scope="${name%%+*}"; rest="${name#${scope}+}"; pkg="${rest%%+*}"
+                target="${scope}/${pkg}"
+              else
+                target="${name%%+*}"
+              fi
+              if [ ! -d "node_modules/$target" ]; then
+                echo "Skip $base (no package $target)"; mv "$p" "patches/_ignored/$base"
+              fi
+            done < <(find patches -maxdepth 1 -type f -name "*.patch" -print0)
+          fi
+
+      # 若前面的 postinstall 未跑到（某些 CI 情况），手动再执行一次
+      - name: Apply patch-package (fallback)
+        run: npx patch-package || true
+
+      # 兜底：确保 RN Android CLI & Gradle plugin 在 node_modules 中
+      - name: Ensure RN Android CLI & Gradle plugin
+        run: |
+          set -euxo pipefail
+          MISSING=0
+          if [ ! -f "node_modules/@react-native-community/cli-platform-android/native_modules.gradle" ]; then
+            yarn add -D @react-native-community/cli-platform-android
+            MISSING=1
+          fi
+          if [ ! -d "node_modules/@react-native/gradle-plugin" ]; then
+            yarn add -D @react-native/gradle-plugin
+            MISSING=1
+          fi
+          if [ "$MISSING" = "1" ]; then npx patch-package || true; fi
+
+      - name: Setup Java (Temurin 17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Print Gradle & AGP versions
+        working-directory: android
+        run: |
+          ./gradlew --version
+          ./gradlew buildEnvironment -q || true
+
+      - name: Build Debug APK
+        working-directory: android
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          CI: true
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace --warning-mode all
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: xstreaming-android-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7      - name: Enable Corepack & Yarn 4.2.2
         run: |
           set -euxo pipefail
           corepack enable
