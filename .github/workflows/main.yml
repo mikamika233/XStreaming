@@ -24,6 +24,18 @@ jobs:
           corepack enable
           corepack prepare yarn@4.2.2 --activate
 
+      - name: Normalize patch files
+        run: |
+          echo "Normalizing patch files..."
+          for f in patches/*.patch; do
+            if [ -f "$f" ]; then
+              # 转换换行符为 LF
+              perl -pi -e 's/\r\n/\n/g' "$f"
+              # 去掉 UTF-8 BOM（如果有）
+              sed -i '1s/^\xEF\xBB\xBF//' "$f"
+            fi
+          done
+
       # 关键：显式关闭 immutable（CI=true 时默认是开的）
       - name: Install dependencies (allow lockfile updates)
         run: yarn install --no-immutable
