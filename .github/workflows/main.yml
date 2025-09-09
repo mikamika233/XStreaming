@@ -53,19 +53,6 @@ jobs:
               exit 1
             fi
 
-            # 5) 试打（不改工作区），并在失败时给出上下文
-            echo "→ Dry-run apply $f"
-            if ! git apply --check --unsafe-paths -p1 "$f" 2> /tmp/git-apply.err; then
-              echo "::error file=$f::git apply --check failed"
-              cat /tmp/git-apply.err || true
-              # 尝试解析报错中的行号并打印附近上下文
-              LINE=$(grep -oE 'at line [0-9]+' /tmp/git-apply.err | awk '{print $3}' | tail -n1 || true)
-              if [ -n "${LINE:-}" ]; then
-                echo "Context around failure (lines $((LINE-8))..$((LINE+8))):"
-                nl -ba "$f" | sed -n "$((LINE-8)),$((LINE+8))p" || true
-              fi
-              exit 1
-            fi
           done
 
       # 关键：显式关闭 immutable（CI=true 时默认是开的）
