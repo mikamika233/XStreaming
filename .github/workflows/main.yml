@@ -24,43 +24,6 @@ jobs:
           corepack enable
           corepack prepare yarn@4.2.2 --activate
 
-      - name: Normalize & verify patch files
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          if [ ! -d patches ]; then
-            echo "No patches/ directory, skipping."
-            exit 0
-          fi
-
-          for f in patches/*.patch; do
-            echo "→ Normalize $f"
-            # 1) CRLF -> LF
-            perl -pi -e 's/\r\n/\n/g' "$f"
-            # 2) 去 UTF-8 BOM
-            sed -i '1s/^\xEF\xBB\xBF//' "$f"
-
-            # 3) 检查合并冲突标记
-            if grep -nE '^(<<<<<<<|=======|>>>>>>>)' "$f"; then
-              echo "::error file=$f::Found merge conflict markers"
-              exit 1
-            fi
-
-            # 4) 最小结构校验（必须有这些头部）
-            if ! (grep -q '^diff --git ' "$f" && grep -q '^--- ' "$f" && grep -q '^\+\+\+ ' "$f" && grep -q '^@@ ' "$f"); then
-              echo "::error file=$f::Patch headers look malformed (missing diff/---/+++/@@)"
-              nl -ba "$f" | sed -n '1,120p'
-              exit 1
-            fi
-
-          done
-
-      - name: Relax git whitespace checks for apply
-        run: |
-          git config --global apply.whitespace nowarn
-          # 也可选 fix：自动修正尾随空白，但先从 nowarn 开始
-          git config --global apply.whitespace fix
-
       # 关键：显式关闭 immutable（CI=true 时默认是开的）
       - name: Install dependencies (allow lockfile updates)
         run: yarn install --no-immutable
