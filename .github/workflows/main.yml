@@ -41,10 +41,6 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Decode keystore
-        run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/release.keystore
-
       # 安装 Android SDK（无需模拟器，仅构建即可）
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -67,28 +63,34 @@ jobs:
             --bundle-output android/app/src/main/assets/index.android.bundle \
             --assets-dest android/app/src/main/res/
 
-      # ======（可选）签名配置 START ======
-      # 如果你想出带签名 APK/AAB，请在 Repo Secrets 里配置：
-      # ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
-      - name: Decode keystore (if provided)
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+      # 解码 keystore（如果有 secrets 就解码，否则跳过）
+      - name: Decode keystore (optional)
         run: |
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/release.keystore
+          echo "Decoded keystore to android/app/release.keystore"
+          else
+          echo "No ANDROID_KEYSTORE_BASE64 provided. Will build unsigned release."
+          fi
 
-      - name: Write signing to gradle.properties (if provided)
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+      # 将签名变量写入 gradle.properties（如果有 secrets）
+      - name: Write signing to gradle.properties (optional)
         run: |
           mkdir -p ~/.gradle
-          cat >> ~/.gradle/gradle.properties <<EOF
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" ] && \
+             [ -n "${{ secrets.ANDROID_KEY_ALIAS }}" ] && \
+             [ -n "${{ secrets.ANDROID_KEY_PASSWORD }}" ]; then
+          cat >> ~/.gradle/gradle.properties <<'EOF'
           MYAPP_UPLOAD_STORE_FILE=release.keystore
           MYAPP_UPLOAD_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           MYAPP_UPLOAD_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}
           MYAPP_UPLOAD_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}
           EOF
-      # 说明：
-      # 你的 android/app/build.gradle 需要按上述四个属性读取签名（常见写法见文末备注）
-      # ======（可选）签名配置 END ======
-
+          echo "Signing props written to ~/.gradle/gradle.properties"
+          else
+          echo "Signing secrets not fully provided. Will build unsigned release."
+          fi
+      
       - name: Build APK (assembleRelease)
         working-directory: android
         run: ./gradlew --no-daemon assembleRelease
