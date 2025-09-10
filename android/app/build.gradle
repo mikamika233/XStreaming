@@ -25,10 +25,12 @@ android {
 
     signingConfigs {
         debug {
-            storeFile file('debug.keystore')
-            storePassword 'android'
-            keyAlias 'androiddebugkey'
-            keyPassword 'android'
+            // 使用自定义 debug.keystore（你需要保证文件存在）
+            storeFile file("$rootDir/app/debug.keystore")
+            // 读取环境变量，若未设置则使用 Android 默认调试证书的口令/别名
+            storePassword System.getenv("DEBUG_STORE_PASSWORD") ?: "android"
+            keyAlias      System.getenv("DEBUG_KEY_ALIAS")      ?: "androiddebugkey"
+            keyPassword   System.getenv("DEBUG_KEY_PASSWORD")   ?: "android"
         }
 
         release {
@@ -45,6 +47,7 @@ android {
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
+            debuggable true
         }
         release {
             // 如果 release keystore 配置存在就用 release，否则 fallback 到 debug
